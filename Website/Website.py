@@ -6,78 +6,52 @@ from typing import List
 from hume import AsyncHumeClient
 from hume.expression_measurement.batch.types import UnionPredictResult
 from dotenv import load_dotenv
-import numpy as np
-import matplotlib.pyplot as plt
-from reflex_pyplot import pyplot
-from reflex.style import toggle_color_mode
 import os
-import requests
-import reflex as rx
 from urllib.parse import urlencode
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
 
+load_dotenv(dotenv_path='./Website/.env')
 
-load_dotenv()
 HUME_API_KEY = os.getenv("HUME_API_KEY")
-
 client = AsyncHumeClient(api_key=HUME_API_KEY)
-CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+SPOTIPY_CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
+SPOTIPY_CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
-
-SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
-SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
-SPOTIFY_API_URL = "https://api.spotify.com/v1"
 
 # Scope for accessing user's top tracks
 SCOPE = "user-top-read"
-
+sp = None
 class State(rx.State):
     """App state to manage user input and API response."""
     show_questions: bool = False
     user_input: str = ""
     emotion_result: dict = {}  # Store API result
-    maxEmotion = ""
-    maxVal = 0
-    access_token: str = ""
-    top_tracks: list = []
-    def login(self):
-        """Redirect user to Spotify login page."""
-        auth_query = urlencode({
-            "response_type": "code",
-            "client_id": CLIENT_ID,
-            "scope": SCOPE,
-            "redirect_uri": REDIRECT_URI,
-        })
-        auth_url = f"{SPOTIFY_AUTH_URL}/?{auth_query}"
-        return rx.redirect(auth_url)
+    maxEmotion: str = ""
+    maxVal: int = 0
+    playlistName: str = ""
+    def spotifyLogin(self):
+        auth_manager = SpotifyOAuth(client_id=SPOTIPY_CLIENT_ID,
+                                               client_secret=SPOTIPY_CLIENT_SECRET,
+                                               redirect_uri=REDIRECT_URI,
+                                               scope="user-library-read")
+        sp = spotipy.Spotify(auth_manager=auth_manager)
+        user = sp.current_user()
+        self.show_questions = not (self.show_questions)
+    def spotifyPlaylist(sp, emotion):
+        # Search for playlists with the emotion in the title
+        results = sp.search(q=f'playlist:{emotion}', type='playlist', limit=1)
 
-    def get_access_token(self, code: str):
-        """Exchange authorization code for access token."""
-        token_data = {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": REDIRECT_URI,
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-        }
-        response = requests.post(SPOTIFY_TOKEN_URL, data=token_data)
-        self.access_token = response.json().get("access_token")
+        if results['playlists']['items']:
+            playlist = results['playlists']['items'][0]
+            playlist_id = playlist['id']
+            playlist_name = playlist['name']
 
-        if self.access_token:
-            self.fetch_top_tracks()
-
-    def fetch_top_tracks(self):
-        """Fetch user's top tracks from Spotify."""
-        headers = {"Authorization": f"Bearer {self.access_token}"}
-        response = requests.get(f"{SPOTIFY_API_URL}/me/top/tracks?limit=10", headers=headers)
-        tracks = response.json().get("items", [])
-
-        # Save track name and artist for display
-        self.top_tracks = [{"name": t["name"], "artist": t["artists"][0]["name"]} for t in tracks]
-
-    def save_selection(self, selected_songs):
-        """Handle the user's selection of top 5 songs."""
-        print(f"Selected Songs: {selected_songs}")
+            sp.current_user_follow_playlist(playlist_id)
+            return playlist_name
+    def processSP(self):
+        if sp:
+            self.playlistName = self.spotifyPlaylist(sp, self.maxEmotion)
 
     def set_user_input(self, value: str):
         self.user_input = value
@@ -131,6 +105,7 @@ class State(rx.State):
             if self.emotion_result[i] == self.maxVal:
                 self.maxEmotion = i
                 break
+        
 
 
 
@@ -200,17 +175,7 @@ async def poll_until_complete(client: AsyncHumeClient, job_id):
         # Increase the delay exponentially, maxing out at 16 seconds
         delay = min(delay * 2, 16)
 
-def showcaseEmotions(key):
-    return rx.button(
-            f"{key} : {State.emotion_result[key]}",
-            background_color="green",
-            padding='4px'
-        )
-def question_set(question: str) -> rx.Component:
-    """Generate a question text component."""
-    return rx.text(question, size='4', margin="0.5rem 0")
-def changing(text):
-    State.user_input += text
+
 @rx.page(on_load=State.pageRefresh)
 def index() -> rx.Component:
     
@@ -225,17 +190,15 @@ def index() -> rx.Component:
                 rx.text(
                     "Login with Spotify and answer a few questions to let Hume AI analyze your emotional spectrum."
                 ),
-                rx.button("Login with Spotify", on_click=State.login),
+                rx.button("Login with Spotify", on_click=State.spotifyLogin),
             
             )
         ),
         # Questions and input field view
         rx.cond(
-            State.show_questions,
-            rx.cond(
-                ~State.emotion_result,
+                State.show_questions,
                 rx.vstack(
-                    question_set("How are you today?"),
+                    rx.text("How are you today?", size='4', margin="0.5rem 0"),
                     rx.input(
                         placeholder="Tell us how you really feel!",
                         value=State.user_input,
@@ -248,16 +211,13 @@ def index() -> rx.Component:
                     ),
                 ),
             ),
-        ),
         rx.cond(
-            (~(~State.emotion_result)),
+            State.emotion_result,
             rx.stack(
-                rx.text(
-                    f"You're probably feeling {State.maxEmotion} with a percent of {State.maxVal}"
-                ),
-                rx.grid(
-                    rx.foreach(State.emotion_result.keys(), showcaseEmotions),
-                    columns="4"
+                rx.text(f"You're probably feeling {State.maxEmotion} with a percent of {State.maxVal}%"),
+                rx.cond(
+                    State.playlistName != "",
+                    rx.text(f"Your playlist name is {State.playlistName}. Enjoy!")
                 )
             )
         ),
@@ -272,10 +232,6 @@ def index() -> rx.Component:
         },
     )
 
-def loginPage() -> rx.Component:
-    rx.stack (
-
-    )
 # Initialize the app and add the page
 app = rx.App()
 app.add_page(index)
